@@ -80,3 +80,9 @@ config.local.py
 # Database files
 *.sqlite
 *.sqlite3
+
+# API Keys (NEVER commit)
+*Clés*APIs*.txt
+*API*Keys*.txt
+*.apikey
+*.secret
