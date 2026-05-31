@@ -1,0 +1,6 @@
+websockets==16.0
+cryptography==48.0.0
+wmi==1.5.1
+pywin32==311
+pyinstaller>=6.20.0
+zeroconf>=0.132.2

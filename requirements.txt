@@ -1,0 +1,39 @@
+# CyberScan Dependencies
+# Python 3.12+
+
+# GUI Framework
+PyQt6>=6.4.0
+
+# Communication
+websockets>=12.0
+ssl
+
+# System Monitoring
+psutil>=5.9.0
+wmi>=1.5.1
+pywin32>=306
+
+# Cryptography
+cryptography>=41.0.0
+
+# Database
+sqlite3
+
+# AI/ML APIs
+groq>=0.4.0
+anthropic>=0.18.0
+requests>=2.31.0
+
+# Report Generation
+reportlab>=4.0.0
+
+# Utilities
+asyncio
+threading
+socket
+ctypes
+json
+hashlib
+
+# Development (optional)
+# pyinstaller>=6.0.0  # For building executables

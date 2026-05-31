@@ -1,0 +1,4 @@
+# Dépendances pour l'installeur CyberScan Agent
+pyinstaller>=5.0
+pywin32>=227
+winshell>=0.6

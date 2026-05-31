@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# CyberScan specific
+*.db
+*.db-journal
+cyberscan.db
+cyberscan.db-journal
+*.log
+*.spec.bak
+
+# Compiled binaries (distribution)
+CyberScan_Final_v2.1_Simple/*.exe
+!CyberScan_Final_v2.1_Simple/.gitkeep
+
+# Temporary files
+temp_libs/
+temp/
+tmp/
+*.tmp
+
+# Certificates (generate your own)
+certs/
+!certs/.gitkeep
+
+# PyInstaller
+build/
+dist/
+*.manifest
+*.spec
+
+# Documentation builds
+presentation/*.docx
+presentation/*.pdf
+
+# Local configuration
+.env
+.env.local
+config.local.py
+
+# Database files
+*.sqlite
+*.sqlite3
