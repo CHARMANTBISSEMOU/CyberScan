@@ -257,7 +257,7 @@ def notify_admin_server(server_ip: str, server_port: int, alert_payload: dict) -
 # sur tous les canaux configurés
 # ─────────────────────────────────────────────
 def send_alert(alert_type: str, url: str, machine_name: str,
-               risk_level: str = "CRITIQUE") -> dict:
+               risk_level: str = "CRITIQUE", custom_message: str = None) -> dict:
     """
     Envoie une alerte de sécurité sur tous les canaux actifs.
 
@@ -266,6 +266,7 @@ def send_alert(alert_type: str, url: str, machine_name: str,
         url:          URL ou ressource concernée
         machine_name: Nom de la machine (hostname)
         risk_level:   Niveau de risque (CRITIQUE / ÉLEVÉ / MOYEN)
+        custom_message: Message optionnel généré par IA
 
     Returns:
         dict avec le résultat de chaque canal : {"whatsapp": True, "email": False, ...}
@@ -275,7 +276,7 @@ def send_alert(alert_type: str, url: str, machine_name: str,
     hostname = machine_name or socket.gethostname()
 
     # Construction du message
-    message = (
+    message = custom_message if custom_message else (
         f"🚨 ALERTE {risk_level} — CyberScan\n"
         f"Machine : {hostname}\n"
         f"Type    : {alert_type}\n"

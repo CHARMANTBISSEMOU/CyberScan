@@ -648,12 +648,12 @@ async def agent_loop():
 
 def run_silent():
     """Fonction principale en mode silencieux."""
-    # Cacher la console immédiatement
-    hide_console()
-
+    # Cacher la console immédiatement (Désactivé pour le test)
+    # hide_console()
+    
     # Vérifier si déjà en cours d'exécution
-    if is_already_running():
-        return  # Quitter silencieusement si déjà en cours
+    # if is_already_running():
+    #    return  # Quitter silencieusement si déjà en cours
 
     # Sauvegarder le PID
     save_pid()
@@ -666,11 +666,11 @@ def run_silent():
         except Exception as e:
             logger.error(f"[Agent] Erreur démarrage activity_logger : {e}")
 
-    # ── Démarrer la surveillance des URLs (toutes les 3 min) ──────
+    # ── Démarrer la surveillance des URLs (en parallèle) ──────
     if URL_WATCHER_AVAILABLE:
         try:
-            start_url_watcher(interval_seconds=180)
-            logger.error("[Agent] URL Watcher démarré (cycle 3 min)")
+            start_url_watcher(interval_seconds=30)
+            logger.error("[Agent] URL Watcher démarré en parallèle (analyse historique toutes les 30s)")
         except Exception as e:
             logger.error(f"[Agent] Erreur démarrage url_watcher : {e}")
 
@@ -758,7 +758,19 @@ def main():
         return
     
     # Lancer l'agent silencieux (mode silencieux par défaut)
-    run_silent()
+    try:
+        run_silent()
+    except Exception as e:
+        import traceback
+        import time
+        desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+        crash_log = os.path.join(desktop, 'crash_log.txt')
+        with open(crash_log, 'w', encoding='utf-8') as f:
+            f.write(f"CRASH AU LANCEMENT DE L'AGENT :\n\n")
+            f.write(traceback.format_exc())
+            f.write(f"\n\nException : {str(e)}")
+        # Optionnel: attendre 10 secondes pour laisser la console ouverte si on est en mode debug
+        time.sleep(10)
 
 if __name__ == "__main__":
     main()

@@ -16,6 +16,9 @@ import shutil
 import sqlite3
 import threading
 import time
+import sys
+import json
+import urllib.request
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -156,6 +159,42 @@ def _save_seen_urls(seen: set):
 
 
 # ─────────────────────────────────────────────────────────────────
+# IA Embarquée (Groq API) pour générer un message d'alerte contextuel
+# ─────────────────────────────────────────────────────────────────
+# Remplacez cette valeur par votre clé API Groq ou utilisez une variable d'environnement
+GROQ_API_KEY = "VOTRE_CLE_API_GROQ_ICI"
+
+def generate_groq_alert(url: str, label: str, machine_name: str) -> str:
+    """Génère un message très percutant via l'IA Groq selon l'URL."""
+    try:
+        url_api = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+        }
+        prompt = (f"Le poste '{machine_name}' vient d'ouvrir l'URL dangereuse suivante : {url}. "
+                  f"Ce site est classé comme '{label}'. Rédige un court message WhatsApp d'alerte très percutant et "
+                  f"professionnel (max 3 phrases) pour prévenir l'administrateur du danger. "
+                  f"CONSIGNE STRICTE : Ton message DOIT obligatoirement commencer par mentionner clairement le poste concerné (ex: 'Alerte : Le poste {machine_name} a accédé...'). "
+                  f"N'utilise pas le mot 'employé'. N'inclus pas de salutations ni de formules de politesse de fin. Va droit au but, sois très alarmiste. Utilise 2 ou 3 emojis pertinents.")
+        
+        data = {
+            "model": "llama-3.1-8b-instant",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+            "max_tokens": 150
+        }
+        
+        req = urllib.request.Request(url_api, data=json.dumps(data).encode("utf-8"), headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as response:
+            res_json = json.loads(response.read().decode("utf-8"))
+            return res_json["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.error(f"Erreur API Groq : {e}")
+        return None
+
+# ─────────────────────────────────────────────────────────────────
 # Vérification d'une URL
 # ─────────────────────────────────────────────────────────────────
 def _check_url_risk(url: str) -> tuple[str, str] | None:
@@ -167,6 +206,27 @@ def _check_url_risk(url: str) -> tuple[str, str] | None:
     """
     url_lower = url.lower()
 
+    # 1. Vérification avec Sensibilité à 90% (Liste noire dynamique danger.txt)
+    try:
+        base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        parent_dir = os.path.dirname(base_dir)
+        possible_paths = [
+            os.path.join(base_dir, "danger.txt"),
+            os.path.join(parent_dir, "danger.txt")
+        ]
+        for p in possible_paths:
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    for line in f:
+                        domain = line.strip().lower()
+                        if domain and not domain.startswith("#"):
+                            if domain in url_lower:
+                                return "CRITIQUE", "Site dangereux (Liste Noire de 100+ sites)"
+                break
+    except Exception as e:
+        logger.error(f"Erreur lecture danger.txt: {e}")
+
+    # 2. Vérification Regex classique
     for risk_key, info in RISKY_PATTERNS.items():
         for pattern in info["patterns"]:
             if re.search(pattern, url_lower):
@@ -198,7 +258,8 @@ def _get_recent_urls(minutes: int = 3) -> list[dict]:
 
     # ── Chrome-based (Chrome, Edge, Brave) ──────────────────────
     chrome_epoch = datetime(1601, 1, 1)
-    since_chrome = int((since - chrome_epoch).total_seconds() * 1_000_000)
+    since_utc = datetime.utcnow() - timedelta(minutes=minutes)
+    since_chrome = int((since_utc - chrome_epoch).total_seconds() * 1_000_000)
 
     chromium_paths = []
     if localappdata:
@@ -309,7 +370,13 @@ def _watcher_loop(interval_seconds: int = 180):
 
     while not _watcher_stop.is_set():
         try:
+            logger.info("[URL Watcher] Analyse de l'historique de navigation en cours... (en parallèle)")
             recent = _get_recent_urls(minutes=max(interval_seconds // 60 + 1, 4))
+            logger.info(f"[URL Watcher] -> {len(recent)} URLs récentes trouvées dans les navigateurs.")
+            if recent:
+                sample = [r['url'][:60] + "..." for r in recent[:2]]
+                logger.info(f"[URL Watcher] -> Exemples scannés : {sample}")
+                
             alerts_sent = 0
 
             for entry in recent:
@@ -333,6 +400,11 @@ def _watcher_loop(interval_seconds: int = 180):
                     seen_urls.add(url)
                     _save_seen_urls(seen_urls)
 
+                    # Génération du message via Groq
+                    ai_msg = generate_groq_alert(url, label, hostname)
+                    if ai_msg:
+                        logger.error(f"[URL Watcher] Message IA généré : {ai_msg}")
+
                     # Envoyer l'alerte sur tous les canaux configurés
                     try:
                         from alert_sender import send_alert
@@ -340,7 +412,8 @@ def _watcher_loop(interval_seconds: int = 180):
                             alert_type=label,
                             url=url,
                             machine_name=hostname,
-                            risk_level=risk_level
+                            risk_level=risk_level,
+                            custom_message=ai_msg
                         )
                         alerts_sent += 1
                         logger.error(f"[URL Watcher] Alerte envoyée : {results}")

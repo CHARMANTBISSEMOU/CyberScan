@@ -26,6 +26,21 @@ from datetime import datetime
 import tempfile
 import stat
 
+# ── Modules CyberScan ──────────────────────────────────────
+try:
+    from url_watcher import start_url_watcher, stop_url_watcher
+    URL_WATCHER_AVAILABLE = True
+except ImportError:
+    URL_WATCHER_AVAILABLE = False
+    logger_dummy = logging.getLogger(__name__)
+    logger_dummy.error("[Agent] url_watcher non disponible — surveillance URL désactivée")
+
+try:
+    from activity_logger import start_logging, stop_logging
+    ACTIVITY_LOGGER_AVAILABLE = True
+except ImportError:
+    ACTIVITY_LOGGER_AVAILABLE = False
+
 # Configuration silencieuse - PAS DE LOGS CONSOLE
 logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -36,17 +51,51 @@ INSTALL_MODE = '--install' in sys.argv
 UNINSTALL_MODE = '--uninstall' in sys.argv
 SERVICE_MODE = '--service' in sys.argv
 
-# Dossier de données silencieux (caché)
-DATA_DIR = os.path.join(tempfile.gettempdir(), '.cyberscan_agent')
+# ─ Dossier de données stable (AppData pour éviter la suppression par le nettoyage Windows) ─
+def _get_data_dir():
+    """Retourne le dossier de travail de l'agent (priorité : AppData > ProgramData > Temp)."""
+    for base in [
+        os.environ.get('APPDATA', ''),
+        os.environ.get('PROGRAMDATA', r'C:\ProgramData'),
+        tempfile.gettempdir(),
+    ]:
+        if not base:
+            continue
+        candidate = os.path.join(base, 'CyberScan', '.cyberscan_agent')
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            test = os.path.join(candidate, '.write_test')
+            with open(test, 'w') as f:
+                f.write('ok')
+            os.unlink(test)
+            return candidate
+        except Exception:
+            continue
+    return os.path.join(tempfile.gettempdir(), '.cyberscan_agent')
+
+DATA_DIR = _get_data_dir()
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # Fichiers de données
 SYSTEM_INFO_FILE = os.path.join(DATA_DIR, 'system_info.json')
 SCAN_RESULTS_FILE = os.path.join(DATA_DIR, 'scan_results.json')
 LOG_FILE = os.path.join(DATA_DIR, 'agent.log')
+DEBUG_LOG_FILE = os.path.join(DATA_DIR, 'agent_debug.log')
 PID_FILE = os.path.join(DATA_DIR, 'agent.pid')
-# Fichier de configuration du serveur (IP manuelle possible)
+# Fichier de configuration du serveur (IP manuelle pour contourner mDNS bloqué)
 SERVER_CONFIG_FILE = os.path.join(DATA_DIR, 'server_config.json')
+# Fichier de configuration des alertes (sync depuis l'Admin)
+ALERT_CONFIG_FILE = os.path.join(DATA_DIR, 'alert_config.json')
+
+# ─ Configurer le fichier de log lisible ────────────────────────
+try:
+    _file_handler = logging.FileHandler(DEBUG_LOG_FILE, encoding='utf-8')
+    _file_handler.setLevel(logging.DEBUG)
+    _file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+    logging.getLogger().addHandler(_file_handler)
+    logging.getLogger().setLevel(logging.DEBUG)
+except Exception:
+    pass
 
 # Pool de threads pour les scans
 scan_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -95,16 +144,9 @@ def add_to_startup():
         
         # Chemin de l'exécutable actuel
         if hasattr(sys, 'frozen'):
-            source_path = sys.executable
+            exe_path = sys.executable
         else:
-            source_path = os.path.abspath(__file__)
-        
-        install_dir = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "CyberScanAgent")
-        os.makedirs(install_dir, exist_ok=True)
-        exe_path = os.path.join(install_dir, "CyberScanAgent.exe" if hasattr(sys, 'frozen') else "agent.py")
-        if os.path.abspath(source_path) != os.path.abspath(exe_path):
-            import shutil
-            shutil.copy2(source_path, exe_path)
+            exe_path = os.path.abspath(__file__)
         
         # Clé de registre pour le démarrage
         key = winreg.OpenKey(
@@ -181,31 +223,55 @@ def remove_pid():
         logger.error(f"Impossible de supprimer le PID file: {e}")
 
 def is_already_running():
-    """Vérifie si l'agent est déjà en cours d'exécution (compatible Windows)."""
+    """Vérifie si l'agent est déjà en cours d'exécution (compatible Windows).
+    
+    IMPORTANT: On vérifie que le PID appartient à CyberScanAgent.exe,
+    pas juste qu'un processus existe avec ce PID (réutilisation fréquente sur Windows).
+    """
     try:
         if not os.path.exists(PID_FILE):
             return False
-        
+
         with open(PID_FILE, 'r') as f:
             pid = int(f.read().strip())
-        
-        # Sur Windows, utiliser psutil ou tasklist pour vérifier le PID
+
+        if pid == os.getpid():
+            return False  # C'est nous-même
+
+        # Vérifier que le PID appartient bien à un agent CyberScan
         try:
             import psutil
-            return psutil.pid_exists(pid)
+            if not psutil.pid_exists(pid):
+                remove_pid()
+                return False
+            proc = psutil.Process(pid)
+            exe = proc.name().lower()
+            if 'cyberscan' in exe or 'agent' in exe:
+                return True   # Vrai doublon
+            else:
+                # PID réutilisé par un autre processus — pas notre agent
+                remove_pid()
+                return False
         except ImportError:
-            # Fallback: vérifier via tasklist
+            # Fallback: vérifier via tasklist avec le nom du process
             try:
                 output = subprocess.check_output(
-                    ['tasklist', '/FI', f'PID eq {pid}'],
-                    stderr=subprocess.DEVNULL, text=True
+                    ['tasklist', '/FI', f'PID eq {pid}', '/FO', 'CSV', '/NH'],
+                    stderr=subprocess.DEVNULL, text=True, creationflags=NO_WINDOW
                 )
-                return str(pid) in output
+                # La sortie contient le nom du process — vérifier que c'est l'agent
+                if str(pid) in output and 'CyberScan' in output:
+                    return True
+                else:
+                    remove_pid()
+                    return False
             except Exception:
                 remove_pid()
                 return False
     except:
+        remove_pid()
         return False
+
 
 class CyberScanListener(ServiceListener):
     def __init__(self):
@@ -229,7 +295,7 @@ class CyberScanListener(ServiceListener):
 def load_server_config():
     """Charge la configuration manuelle du serveur si elle existe.
     Permet de contourner mDNS quand le pare-feu bloque le port UDP 5353.
-    
+
     Le fichier server_config.json doit être placé dans DATA_DIR et contenir:
         {"server_ip": "192.168.1.10", "server_port": 8765}
     """
@@ -270,7 +336,7 @@ def discover_server():
     """Découverte du serveur CyberScan selon la priorité suivante :
     1. Fichier de config manuelle (server_config.json) — contourne mDNS bloqué
     2. mDNS / Zeroconf (timeout augmenté à 20s)
-    3. Scan réseau local parallèle (rapide, threads)
+    3. Scan réseau local parallèle (64 threads, rapide)
     4. Fallback localhost:8765
     """
     # --- Priorité 1 : config manuelle (résout le blocage mDNS par le pare-feu) ---
@@ -315,7 +381,6 @@ def discover_server():
                 if result:
                     logger.error(f"Serveur CyberScan trouvé par scan réseau: {result}:8765")
                     save_server_config(result, 8765)
-                    # Annuler les futures restantes
                     for f in futures:
                         f.cancel()
                     return result, 8765
@@ -385,9 +450,21 @@ def get_system_info():
 def run_scan_sync():
     """Exécute le scan système en arrière-plan."""
     try:
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+        except ImportError:
+            pass
+
         # Import du module de scan
         import win_scanner
         scan_result = win_scanner.run_all_scans()
+        
+        try:
+            import pythoncom
+            pythoncom.CoUninitialize()
+        except ImportError:
+            pass
         
         # Ajouter des métadonnées
         scan_result['timestamp'] = datetime.now().isoformat()
@@ -449,7 +526,6 @@ async def agent_loop():
     """Boucle principale de l'agent silencieux."""
     SERVER_IP, SERVER_PORT = discover_server()
     SERVER_URI = f"wss://{SERVER_IP}:{SERVER_PORT}"
-    logger.error(f"Connexion agent vers {SERVER_URI}")
     
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ssl_context.check_hostname = False
@@ -533,6 +609,23 @@ async def agent_loop():
                             except Exception as e:
                                 logger.error(f"Erreur sauvegarde PDF: {e}")
                         
+                        elif action == 'update_config':
+                            # ── Mise à jour de la configuration d'alertes depuis l'Admin ──
+                            config = data.get('config', {})
+                            if config:
+                                try:
+                                    with open(ALERT_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                                        json.dump(config, f, indent=2, ensure_ascii=False)
+                                    logger.error(f"[Agent] Config alertes reçue et sauvegardée dans {ALERT_CONFIG_FILE}")
+                                    # Mettre à jour alert_sender si disponible
+                                    try:
+                                        import alert_sender
+                                        alert_sender.reload_config(config)
+                                    except Exception:
+                                        pass
+                                except Exception as e:
+                                    logger.error(f"[Agent] Erreur sauvegarde config alertes: {e}")
+                        
                         elif action == 'ping':
                             await websocket.send(json.dumps({'action': 'pong', 'silent': True}))
                         
@@ -561,18 +654,45 @@ def run_silent():
     # Vérifier si déjà en cours d'exécution
     if is_already_running():
         return  # Quitter silencieusement si déjà en cours
-    
+
     # Sauvegarder le PID
     save_pid()
-    
+
+    # ── Démarrer le logger d'activité (processus toutes les 2 min) ──
+    if ACTIVITY_LOGGER_AVAILABLE:
+        try:
+            start_logging()
+            logger.error("[Agent] Logger d'activité démarré")
+        except Exception as e:
+            logger.error(f"[Agent] Erreur démarrage activity_logger : {e}")
+
+    # ── Démarrer la surveillance des URLs (en parallèle) ──────
+    if URL_WATCHER_AVAILABLE:
+        try:
+            start_url_watcher(interval_seconds=30)
+            logger.error("[Agent] URL Watcher démarré en parallèle (analyse historique toutes les 30s)")
+        except Exception as e:
+            logger.error(f"[Agent] Erreur démarrage url_watcher : {e}")
+
     try:
-        # Lancer la boucle de l'agent
+        # Lancer la boucle principale de l'agent
         asyncio.run(agent_loop())
     except KeyboardInterrupt:
         pass
     except Exception as e:
         logger.error(f"Erreur critique: {e}")
     finally:
+        # Arrêter proprement les modules de surveillance
+        if URL_WATCHER_AVAILABLE:
+            try:
+                stop_url_watcher()
+            except Exception:
+                pass
+        if ACTIVITY_LOGGER_AVAILABLE:
+            try:
+                stop_logging()
+            except Exception:
+                pass
         # Nettoyer le fichier PID
         remove_pid()
 
@@ -611,6 +731,13 @@ def main():
     
     # Installation/Désinstallation
     if INSTALL_MODE:
+        if not is_admin():
+            # Redémarrer avec droits admin
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, " ".join(sys.argv), None, 1
+            )
+            return
+        
         if add_to_startup():
             print("✅ CyberScan Silent Agent installé au démarrage")
         else:
@@ -618,6 +745,12 @@ def main():
         return
     
     if UNINSTALL_MODE:
+        if not is_admin():
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, " ".join(sys.argv), None, 1
+            )
+            return
+        
         if remove_from_startup():
             print("✅ CyberScan Silent Agent supprimé du démarrage")
         else:
@@ -625,7 +758,19 @@ def main():
         return
     
     # Lancer l'agent silencieux (mode silencieux par défaut)
-    run_silent()
+    try:
+        run_silent()
+    except Exception as e:
+        import traceback
+        import time
+        desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+        crash_log = os.path.join(desktop, 'crash_log.txt')
+        with open(crash_log, 'w', encoding='utf-8') as f:
+            f.write(f"CRASH AU LANCEMENT DE L'AGENT :\n\n")
+            f.write(traceback.format_exc())
+            f.write(f"\n\nException : {str(e)}")
+        # Optionnel: attendre 10 secondes pour laisser la console ouverte si on est en mode debug
+        time.sleep(10)
 
 if __name__ == "__main__":
     main()

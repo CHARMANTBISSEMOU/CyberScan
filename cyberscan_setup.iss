@@ -12,8 +12,8 @@
 #define MyIconPath "C:\Users\EDITH-PARKERT\Desktop\COURS KEYCE\Semestre II\Projet tuteure4\Medias\logo.ico"
 #define AdminExe "C:\Users\EDITH-PARKERT\Desktop\COURS KEYCE\Semestre II\Projet tuteure4\cyberscan\cyberscan_admin\dist\CyberScanAdmin.exe"
 #define AgentExe "C:\Users\EDITH-PARKERT\Desktop\COURS KEYCE\Semestre II\Projet tuteure4\cyberscan\cyberscan_agent\dist\CyberScanAgent.exe"
-#define DBFile "C:\Users\EDITH-PARKERT\Desktop\COURS KEYCE\Semestre II\Projet tuteure4\cyberscan\CyberScan_Final_v2.1_Simple\cyberscan.db"
-#define CertsDir "C:\Users\EDITH-PARKERT\Desktop\COURS KEYCE\Semestre II\Projet tuteure4\cyberscan\CyberScan_Final_v2.1_Simple\certs"
+#define DBFile "C:\Users\EDITH-PARKERT\Desktop\COURS KEYCE\Semestre II\Projet tuteure4\cyberscan\cyberscan.db"
+#define CertsDir "C:\Users\EDITH-PARKERT\Desktop\COURS KEYCE\Semestre II\Projet tuteure4\cyberscan\certs"
 #define OutputDir "C:\Users\EDITH-PARKERT\Desktop\COURS KEYCE\Semestre II\Projet tuteure4\cyberscan\Setup"
 
 [Setup]
@@ -51,11 +51,12 @@ Name: "startup_agent"; Description: "Lancer l'agent CyberScan automatiquement au
 Source: "{#AdminExe}"; DestDir: "{app}"; DestName: "CyberScan.exe"; Flags: ignoreversion
 ; Agent silencieux
 Source: "{#AgentExe}"; DestDir: "{app}"; DestName: "CyberScanAgent.exe"; Flags: ignoreversion
+; Liste noire
+Source: "danger.txt"; DestDir: "{app}"; Flags: ignoreversion
 ; Base de données initiale (déployée dans AppData pour avoir les droits d'écriture)
 Source: "{#DBFile}"; DestDir: "{userappdata}\CyberScan"; DestName: "cyberscan.db"; Flags: onlyifdoesntexist
 ; Certificats SSL pour le serveur WebSocket
 Source: "{#CertsDir}\*"; DestDir: "{app}\certs"; Flags: ignoreversion recursesubdirs createallsubdirs
-
 [Icons]
 ; Menu Démarrer
 Name: "{group}\CyberScan Admin"; Filename: "{app}\CyberScan.exe"; IconFilename: "{app}\CyberScan.exe"

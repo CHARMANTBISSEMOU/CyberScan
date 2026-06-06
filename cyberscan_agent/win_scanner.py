@@ -8,6 +8,7 @@ import subprocess
 import os
 import socket
 import ctypes
+import pythoncom
 from datetime import datetime, timedelta
 
 # Flag pour masquer les fenêtres console des subprocess
@@ -18,6 +19,10 @@ NO_WINDOW = subprocess.CREATE_NO_WINDOW
 # ============================================================
 def get_system_info():
     """Récupère les infos OS, pare-feu détaillé, mises à jour manquantes"""
+    try:
+        pythoncom.CoInitialize()
+    except Exception:
+        pass
     result = {
         "os_name": "Unknown",
         "os_version": "Unknown",
@@ -481,6 +486,10 @@ def get_services_audit():
 # ============================================================
 def get_antivirus_status():
     """Vérifie le statut de l'antivirus (Windows Defender ou autre)"""
+    try:
+        pythoncom.CoInitialize()
+    except Exception:
+        pass
     result = {
         "antivirus_products": [],
         "defender_status": {},
@@ -548,6 +557,10 @@ def get_antivirus_status():
 # ============================================================
 def get_installed_programs():
     """Liste les programmes installés via le registre (instantané, remplace Win32_Product qui prend 2+ min)"""
+    try:
+        pythoncom.CoInitialize()
+    except Exception:
+        pass
     programs = []
     try:
         import winreg
