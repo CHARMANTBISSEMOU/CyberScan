@@ -103,11 +103,16 @@ Ce scénario démontre la réactivité de CyberScan en conditions réelles :
 
 ## 🚀 Installation
 
-### Installation via l'Installeur (Recommandé)
-Un Setup professionnel (généré via Inno Setup) est disponible pour installer automatiquement l'Admin et l'Agent.
-1. Allez dans le dossier `Setup/`
-2. Exécutez `CyberScan_Setup_Final.exe`
-3. L'installeur copiera les fichiers, créera les raccourcis, demandera les permissions administrateur (UAC) nécessaires à l'agent, et gèrera les bases de données.
+### 📦 Installation Automatique (Setup Recommandé)
+Un exécutable d'installation (Setup) "clé en main" est disponible pour déployer en un clic la **Console Admin** et l'**Agent Silencieux v2.1**.
+
+**Processus :**
+1. Allez dans le dossier **[Setup/](Setup/)** de ce dépôt GitHub.
+2. Cliquez sur le fichier **`CyberScan_Setup_Final.exe`** et téléchargez-le (Download raw file).
+3. Exécutez le Setup sur votre machine Windows.
+4. L'installeur copiera les fichiers, installera les certificats SSL, déploiera l'Agent caché en arrière-plan et placera les raccourcis sur votre bureau.
+
+> **💡 Note :** L'agent d'analyse de vulnérabilités et de surveillance d'URL se lancera tout seul au démarrage de la machine et fonctionnera en mode invisible. Vous n'aurez qu'à utiliser le raccourci **CyberScan Admin** pour superviser le parc !
 
 ### Installation depuis les sources (Développement)
 ```bash
