@@ -6,8 +6,17 @@ from datetime import datetime
 from crypto_utils import encrypt_data, decrypt_data
 
 class CyberScanDB:
-    def __init__(self, db_path="cyberscan.db"):
-        self.db_path = db_path
+    def __init__(self, db_path=None):
+        if db_path is None or db_path == "cyberscan.db":
+            appdata = os.environ.get('APPDATA', '')
+            if appdata:
+                app_dir = os.path.join(appdata, 'CyberScan')
+                os.makedirs(app_dir, exist_ok=True)
+                self.db_path = os.path.join(app_dir, "cyberscan.db")
+            else:
+                self.db_path = "cyberscan.db"
+        else:
+            self.db_path = db_path
         self._init_db()
 
     def _init_db(self):
@@ -39,6 +48,13 @@ class CyberScanDB:
                 CREATE TABLE IF NOT EXISTS api_keys (
                     provider TEXT PRIMARY KEY,
                     key_value TEXT
+                )
+            ''')
+            # Table de paramètres généraux (config alertes, etc.)
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
                 )
             ''')
             conn.commit()
@@ -192,6 +208,33 @@ class CyberScanDB:
                 conn.commit()
         except Exception as e:
             logging.error(f"Erreur enregistrement clé API {provider}: {e}")
+
+    def get_setting(self, key):
+        """Récupère un paramètre général (ex: alert_config)."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                c = conn.cursor()
+                c.execute("SELECT value FROM settings WHERE key = ?", (key,))
+                row = c.fetchone()
+                if row:
+                    return row[0]
+                return None
+        except Exception as e:
+            logging.error(f"Erreur récupération paramètre {key}: {e}")
+            return None
+
+    def set_setting(self, key, value):
+        """Enregistre un paramètre général."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                c = conn.cursor()
+                c.execute('''
+                    INSERT INTO settings (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                ''', (key, value))
+                conn.commit()
+        except Exception as e:
+            logging.error(f"Erreur sauvegarde paramètre {key}: {e}")
 
     def get_api_key(self, provider):
         """Récupère une clé API et la déchiffre."""

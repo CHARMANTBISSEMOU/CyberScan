@@ -83,6 +83,20 @@ async def request_email_check(websocket, emails, api_key):
     except Exception as e:
         logging.error(f"Erreur envoi vérification email : {e}")
 
+async def broadcast_config(config_dict):
+    """Diffuse la configuration d'alertes à tous les agents connectés.
+    Appelé quand l'admin sauvegarde sa configuration.
+    """
+    if not connected_agents:
+        return
+    msg = json.dumps({'action': 'update_config', 'config': config_dict})
+    for ws in list(connected_agents.keys()):
+        try:
+            await ws.send(msg)
+            logging.info(f"Config envoyée à {connected_agents[ws].get('hostname', '?')}")
+        except Exception as e:
+            logging.warning(f"Impossible d'envoyer la config à un agent: {e}")
+
 async def send_pdf_to_agent(websocket, machine_info, ai_report, hostname):
     """Génère et envoie un PDF simplifié (actions uniquement) au bureau de la machine cible."""
     pdf_b64 = generate_and_encode_pdf(machine_info, ai_report, actions_only=True)
@@ -120,6 +134,19 @@ async def handler(websocket):
             
             await websocket.send(json.dumps({'status': 'registered', 'message': 'Bienvenue sur CyberScan Admin'}))
             
+            # ─ Envoyer immédiatement la config d'alertes à l'agent ──────────
+            try:
+                alert_config_raw = db.get_setting("alert_config")
+                if alert_config_raw:
+                    alert_config = json.loads(alert_config_raw)
+                    await websocket.send(json.dumps({
+                        'action': 'update_config',
+                        'config': alert_config
+                    }))
+                    logging.info(f"Config alertes envoyée à {hostname}")
+            except Exception as e:
+                logging.warning(f"Impossible d'envoyer la config alertes à {hostname}: {e}")
+            
             # Scan initial automatique (mode complet par défaut)
             logging.info(f"Demande de scan initial à {hostname} (mode: full)...")
             await websocket.send(json.dumps({'action': 'scan', 'mode': 'full'}))
@@ -139,7 +166,7 @@ async def handler(websocket):
                         logging.info(f"{hostname} : statut scan = {status}")
                         # Tracker les machines en cours de scan pour l'animation UI
                         try:
-                            import app as app_module
+                            import sys; app_module = sys.modules.get('__main__')
                             if status == 'scanning':
                                 app_module.scanning_machines.add(agent_id)
                             else:
@@ -151,7 +178,7 @@ async def handler(websocket):
                     if action == 'scan_result':
                         # Retirer de la liste des machines en cours de scan
                         try:
-                            import app as app_module
+                            import sys; app_module = sys.modules.get('__main__')
                             app_module.scanning_machines.discard(agent_id)
                             app_module.scan_progress_done = min(
                                 app_module.scan_progress_done + 1,
@@ -168,7 +195,7 @@ async def handler(websocket):
                             if tb:
                                 logging.error(f"[AGENT {hostname}] Traceback:\n{tb}")
                             try:
-                                import app as app_module
+                                import sys; app_module = sys.modules.get('__main__')
                                 app_module.last_ai_error = f"Agent {hostname} a plante: {err}"
                             except Exception:
                                 pass
@@ -204,10 +231,22 @@ async def handler(websocket):
                             logging.info(f"Données identiques pour {hostname}. Analyse IA ignorée.")
                             db.update_machine_status(agent_id, 'online')
                             db.register_machine(agent_id, hostname, os_name, client_ip)
+                            # ← Fix : mettre à jour la progression UI même sans IA
+                            try:
+                                import sys; app_module = sys.modules.get('__main__')
+                                app_module.scanning_machines.discard(agent_id)
+                                app_module.scan_progress_done = min(
+                                    app_module.scan_progress_done + 1,
+                                    app_module.scan_progress_total or app_module.scan_progress_done + 1
+                                )
+                                app_module.scan_step_done  = 0
+                                app_module.scan_step_label = ""
+                            except (ImportError, AttributeError):
+                                pass
                         else:
                             logging.info(f"Analyse IA (chunked) pour {hostname}...")
                             try:
-                                import app as app_module
+                                import sys; app_module = sys.modules.get('__main__')
                             except Exception:
                                 app_module = None
 
@@ -233,7 +272,7 @@ async def handler(websocket):
                             db.save_scan_result(agent_id, score, full_result)
                             logging.info(f"Scan sauvegardé pour {hostname}. Score : {score}")
                             try:
-                                import app as app_module
+                                import sys; app_module = sys.modules.get('__main__')
                                 app_module.last_ai_error = ai_report.get('ai_error') if score == 0 else None
                                 app_module.scan_step_done = 0
                                 app_module.scan_step_label = ""
@@ -264,9 +303,58 @@ async def handler(websocket):
                     elif action == 'pdf_delivered':
                         path = payload.get('path', '')
                         logging.info(f"PDF délivré sur {hostname} : {path}")
-                    
+
+                    elif action == 'security_alert':
+                        # ── Alerte URL dangereuse envoyée par l'agent ──────────────
+                        alert_type  = payload.get('alert_type', 'Site suspect')
+                        url         = payload.get('url', '')
+                        risk_level  = payload.get('risk_level', 'ÉLEVÉ')
+                        machine     = payload.get('machine', hostname)
+                        timestamp   = payload.get('timestamp', '')
+                        logging.error(
+                            f"[ALERTE {risk_level}] Machine: {machine} | {alert_type}\n"
+                            f"  URL: {url} | Heure: {timestamp}"
+                        )
+                        # Notifier l'UI admin (label d'alerte + son d'avertissement)
+                        try:
+                            import sys; app_module = sys.modules.get('__main__')
+                            app_module.last_ai_error = (
+                                f"🚨 {risk_level} — {machine} : {alert_type}"
+                            )
+                            # Notification Windows native sur le bureau admin
+                            try:
+                                import win32api, win32con
+                                win32api.MessageBeep(win32con.MB_ICONEXCLAMATION)
+                            except Exception:
+                                pass
+                            # Essayer une toast notification Windows 10/11
+                            try:
+                                from win10toast import ToastNotifier
+                                toaster = ToastNotifier()
+                                toaster.show_toast(
+                                    f"CyberScan — {risk_level}",
+                                    f"Machine : {machine}\n{alert_type}\n{url[:60]}",
+                                    duration=8,
+                                    threaded=True
+                                )
+                            except Exception:
+                                # Fallback : messagebox non-bloquante via ctypes
+                                try:
+                                    import ctypes
+                                    ctypes.windll.user32.MessageBoxW(
+                                        0,
+                                        f"Machine : {machine}\nType : {alert_type}\nURL : {url[:80]}\nHeure : {timestamp}",
+                                        f"⚠️ CyberScan — Alerte {risk_level}",
+                                        0x00000030  # MB_ICONEXCLAMATION
+                                    )
+                                except Exception:
+                                    pass
+                        except (ImportError, AttributeError) as e:
+                            logging.error(f"Erreur notification admin : {e}")
+
                     elif action == 'pong':
                         continue
+
                     
                 except json.JSONDecodeError:
                     logging.error(f"JSON invalide reçu de {hostname}")

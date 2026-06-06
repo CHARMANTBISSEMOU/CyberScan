@@ -64,6 +64,8 @@ certs/
 
 # PyInstaller
 build/
+build_admin/
+build_agent/
 dist/
 *.manifest
 *.spec
@@ -86,3 +88,11 @@ config.local.py
 *API*Keys*.txt
 *.apikey
 *.secret
+
+# Setup and Final Apps
+Setup/
+CyberScan_Final_v2.1_Simple/
+
+# Documentations and Reports (Binary)
+*.docx
+*.pdf

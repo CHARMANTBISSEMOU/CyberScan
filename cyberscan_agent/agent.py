@@ -45,6 +45,8 @@ SYSTEM_INFO_FILE = os.path.join(DATA_DIR, 'system_info.json')
 SCAN_RESULTS_FILE = os.path.join(DATA_DIR, 'scan_results.json')
 LOG_FILE = os.path.join(DATA_DIR, 'agent.log')
 PID_FILE = os.path.join(DATA_DIR, 'agent.pid')
+# Fichier de configuration du serveur (IP manuelle possible)
+SERVER_CONFIG_FILE = os.path.join(DATA_DIR, 'server_config.json')
 
 # Pool de threads pour les scans
 scan_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -147,22 +149,36 @@ def remove_from_startup():
         return False
 
 def save_pid():
-    """Sauvegarde le PID du processus."""
+    """Sauvegarde le PID du processus.
+    IMPORTANT: le fichier PID n'est JAMAIS mis en lecture seule pour éviter
+    qu'un crash laisse un PID orphelin impossible à supprimer.
+    """
     try:
+        # S'assurer que le fichier est accessible en écriture avant tout
+        if os.path.exists(PID_FILE):
+            try:
+                os.chmod(PID_FILE, stat.S_IWUSR | stat.S_IRUSR)
+            except Exception:
+                pass
         with open(PID_FILE, 'w') as f:
             f.write(str(os.getpid()))
-        set_file_readonly(PID_FILE)
-    except:
-        pass
+        # NE PAS appeler set_file_readonly() sur le PID_FILE
+        # pour permettre la suppression propre même après un crash.
+    except Exception as e:
+        logger.error(f"Impossible de sauvegarder le PID: {e}")
 
 def remove_pid():
-    """Supprime le fichier PID."""
+    """Supprime le fichier PID. Gère le cas où le fichier est en lecture seule."""
     try:
         if os.path.exists(PID_FILE):
-            os.chmod(PID_FILE, stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
+            # Toujours rendre le fichier inscriptible avant suppression
+            try:
+                os.chmod(PID_FILE, stat.S_IWUSR | stat.S_IRUSR)
+            except Exception:
+                pass
             os.remove(PID_FILE)
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Impossible de supprimer le PID file: {e}")
 
 def is_already_running():
     """Vérifie si l'agent est déjà en cours d'exécution (compatible Windows)."""
@@ -210,40 +226,108 @@ class CyberScanListener(ServiceListener):
             self.found_port = info.port
             self.event.set()
 
+def load_server_config():
+    """Charge la configuration manuelle du serveur si elle existe.
+    Permet de contourner mDNS quand le pare-feu bloque le port UDP 5353.
+    
+    Le fichier server_config.json doit être placé dans DATA_DIR et contenir:
+        {"server_ip": "192.168.1.10", "server_port": 8765}
+    """
+    try:
+        if os.path.exists(SERVER_CONFIG_FILE):
+            with open(SERVER_CONFIG_FILE, 'r') as f:
+                config = json.load(f)
+            ip = config.get('server_ip', '').strip()
+            port = int(config.get('server_port', 8765))
+            if ip:
+                logger.error(f"Config manuelle chargée: {ip}:{port}")
+                return ip, port
+    except Exception as e:
+        logger.error(f"Erreur lecture server_config.json: {e}")
+    return None, None
+
+
+def save_server_config(ip, port=8765):
+    """Sauvegarde la config du serveur découvert pour les prochains démarrages."""
+    try:
+        config = {'server_ip': ip, 'server_port': port}
+        with open(SERVER_CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        logger.error(f"Erreur sauvegarde server_config.json: {e}")
+
+
+def _try_connect(candidate, port=8765):
+    """Teste si un hôte écoute sur le port WebSocket. Utilisé pour le scan réseau parallèle."""
+    try:
+        with socket.create_connection((candidate, port), timeout=0.4):
+            return candidate
+    except Exception:
+        return None
+
+
 def discover_server():
-    """Découverte automatique du serveur via mDNS."""
+    """Découverte du serveur CyberScan selon la priorité suivante :
+    1. Fichier de config manuelle (server_config.json) — contourne mDNS bloqué
+    2. mDNS / Zeroconf (timeout augmenté à 20s)
+    3. Scan réseau local parallèle (rapide, threads)
+    4. Fallback localhost:8765
+    """
+    # --- Priorité 1 : config manuelle (résout le blocage mDNS par le pare-feu) ---
+    manual_ip, manual_port = load_server_config()
+    if manual_ip:
+        return manual_ip, manual_port
+
+    # --- Priorité 2 : mDNS / Zeroconf (timeout augmenté à 20 secondes) ---
     try:
         zeroconf = Zeroconf()
         listener = CyberScanListener()
         browser = ServiceBrowser(zeroconf, "_cyberscan._tcp.local.", listener)
-        
-        listener.event.wait(timeout=10)
-        
+
+        # Timeout porté à 20s (était 10s) pour laisser plus de temps à mDNS
+        found = listener.event.wait(timeout=20)
+
         zeroconf.close()
-        
-        if listener.found_ip:
+
+        if found and listener.found_ip:
             logger.error(f"Serveur CyberScan découvert via mDNS: {listener.found_ip}:{listener.found_port}")
+            # Sauvegarder pour les prochains démarrages
+            save_server_config(listener.found_ip, listener.found_port)
             return listener.found_ip, listener.found_port
         else:
-            local_ip = get_local_ip()
-            parts = local_ip.split('.')
-            if len(parts) == 4:
-                prefix = '.'.join(parts[:3])
-                for i in range(1, 255):
-                    candidate = f"{prefix}.{i}"
-                    if candidate == local_ip:
-                        continue
-                    try:
-                        with socket.create_connection((candidate, 8765), timeout=0.2):
-                            logger.error(f"Serveur CyberScan trouvé par scan local: {candidate}:8765")
-                            return candidate, 8765
-                    except Exception:
-                        pass
-            logger.error("Serveur CyberScan introuvable, fallback localhost:8765")
-            return 'localhost', 8765
+            logger.error("mDNS : aucun serveur trouvé (peut être bloqué par le pare-feu). Passage au scan réseau...")
     except Exception as e:
-        logger.error(f"Erreur découverte serveur CyberScan: {e}")
-        return 'localhost', 8765
+        logger.error(f"Erreur mDNS: {e}. Passage au scan réseau...")
+
+    # --- Priorité 3 : Scan réseau local en parallèle (threads) ---
+    local_ip = get_local_ip()
+    parts = local_ip.split('.')
+    if len(parts) == 4:
+        prefix = '.'.join(parts[:3])
+        candidates = [f"{prefix}.{i}" for i in range(1, 255) if f"{prefix}.{i}" != local_ip]
+        logger.error(f"Scan réseau {prefix}.1-254 sur port 8765 ({len(candidates)} hôtes)...")
+
+        # Scan parallèle : 64 threads simultanés pour aller beaucoup plus vite
+        with concurrent.futures.ThreadPoolExecutor(max_workers=64) as executor:
+            futures = {executor.submit(_try_connect, ip, 8765): ip for ip in candidates}
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                if result:
+                    logger.error(f"Serveur CyberScan trouvé par scan réseau: {result}:8765")
+                    save_server_config(result, 8765)
+                    # Annuler les futures restantes
+                    for f in futures:
+                        f.cancel()
+                    return result, 8765
+
+    # --- Priorité 4 : Fallback localhost ---
+    logger.error(
+        "Serveur CyberScan introuvable.\n"
+        f"  >> Pour configurer manuellement, créez le fichier:\n"
+        f"     {SERVER_CONFIG_FILE}\n"
+        f"  >> avec le contenu : {{\"server_ip\": \"IP_DU_SERVEUR\", \"server_port\": 8765}}"
+    )
+    return 'localhost', 8765
 
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

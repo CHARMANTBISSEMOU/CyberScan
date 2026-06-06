@@ -21,6 +21,7 @@ from onboarding_wizard import OnboardingWizard, should_show_wizard
 from dashboard_tab import DashboardTab
 import server
 import logging
+import time
 import ia_analyzer
 
 # Démarre le serveur WebSocket dans un thread séparé avec sa propre boucle asyncio
@@ -1103,29 +1104,60 @@ class ApiSettingsDialog(QDialog):
         legend_layout = QVBoxLayout(legend_tab)
         
         legend_items = [
-            ("0 — 20", "#c53030", "CRITIQUE", "Failles exploitables immédiatement"),
-            ("21 — 40", "#dd6b20", "ÉLEVÉ", "Plusieurs vulnérabilités majeures"),
-            ("41 — 60", "#d69e2e", "MOYEN", "Vulnérabilités modérées"),
-            ("61 — 80", "#38a169", "BON", "Bonne sécurité, quelques améliorations"),
-            ("81 — 100", "#276749", "EXCELLENT", "Sécurité robuste"),
+            ("0 — 20",   "#fc8181", "CRITIQUE",   "Failles exploitables immédiatement"),
+            ("21 — 40",  "#f6ad55", "ÉLEVÉ",    "Plusieurs vulnérabilités majeures"),
+            ("41 — 60",  "#f6e05e", "MOYEN",     "Vulnérabilités modérées"),
+            ("61 — 80",  "#68d391", "BON",       "Bonne sécurité, quelques améliorations"),
+            ("81 — 100", "#4fd1c5", "EXCELLENT", "Sécurité robuste"),
         ]
         for range_txt, color, label, desc in legend_items:
             frame = QFrame()
-            frame.setStyleSheet(f"background-color: {color}20; border-left: 4px solid {color}; padding: 6px; margin: 2px;")
+            frame.setStyleSheet(
+                f"background-color: {color}22; border: 1px solid {color}55;"
+                f"border-left: 5px solid {color}; border-radius: 6px;"
+                f"padding: 10px; margin: 4px;"
+            )
             fl = QHBoxLayout(frame)
-            fl.addWidget(QLabel(f"<b style='color:{color}'>{range_txt}</b>"))
-            fl.addWidget(QLabel(f"<b>{label}</b> — {desc}"))
+            score_lbl = QLabel(range_txt)
+            score_lbl.setStyleSheet(f"color: {color}; font-size: 14px; font-weight: bold; min-width: 70px;")
+            label_lbl = QLabel(label)
+            label_lbl.setStyleSheet(f"color: {color}; font-size: 13px; font-weight: bold; min-width: 90px;")
+            desc_lbl  = QLabel(desc)
+            desc_lbl.setStyleSheet("color: #e2e8f0; font-size: 12px;")
+            fl.addWidget(score_lbl)
+            fl.addWidget(label_lbl)
+            fl.addWidget(desc_lbl)
             fl.addStretch()
             legend_layout.addWidget(frame)
         
         legend_layout.addStretch()
-        tabs.addTab(legend_tab, "Légende Scores")
-        
+        legend_tab.setStyleSheet("background-color: #0f1117;")
+        tabs.addTab(legend_tab, "📊 Légende")
+
+        # --- Onglet Alertes (WhatsApp / Email / Windows) ---
+        try:
+            from alert_config_widget import AlertConfigWidget
+            self.alert_widget = AlertConfigWidget(db=self.db)
+            tabs.addTab(self.alert_widget, "🔔 Alertes")
+        except Exception as e:
+            # Fallback si le module n'est pas disponible
+            alert_fallback = QWidget()
+            fl = QVBoxLayout(alert_fallback)
+            lbl = QLabel(f"⚠️ Module alertes non disponible : {e}")
+            lbl.setStyleSheet("color: #fc8181; padding: 20px;")
+            fl.addWidget(lbl)
+            tabs.addTab(alert_fallback, "🔔 Alertes")
+            self.alert_widget = None
+
+        # Redimensionner pour accueillir le nouvel onglet
+        self.resize(600, 560)
+
         # Bouton sauvegarder
         save_btn = QPushButton("Sauvegarder")
         save_btn.setStyleSheet("padding: 8px; font-weight: bold;")
         save_btn.clicked.connect(self.save_keys)
         main_layout.addWidget(save_btn)
+
 
     def save_keys(self):
         self.db.set_api_key("Groq_1", self.groq_input_1.text())
@@ -1141,8 +1173,24 @@ class ApiSettingsDialog(QDialog):
             self.db.set_api_key("ScheduledScanTime", time_str)
         else:
             self.db.set_api_key("ScheduledScanTime", "")
+            
+        # Sauvegarder aussi les paramètres des alertes et diffuser aux agents !
+        if hasattr(self, 'alert_widget') and self.alert_widget:
+            self.alert_widget._collect_config()
+            self.alert_widget._save_config()
+            try:
+                import server
+                import asyncio
+                global server_loop
+                if server_loop and server.connected_agents:
+                    asyncio.run_coroutine_threadsafe(
+                        server.broadcast_config(self.alert_widget.config), server_loop
+                    )
+            except Exception as e:
+                import logging
+                logging.error(f"Erreur diffusion config alertes: {e}")
         
-        QMessageBox.information(self, "Succès", "Paramètres sauvegardés avec succès !")
+        QMessageBox.information(self, "Succès", "Paramètres sauvegardés et diffusés aux agents avec succès !")
         self.accept()
 
 # ============================================================
@@ -1815,99 +1863,87 @@ class CyberScanAdmin(QMainWindow):
         
         main_layout.addWidget(self.tabs)
         
-        # === BARRE DE STATUT MODE SIMPLE (visuelle et informative) ===
-        if self.interface_mode == "simple":
-            status_frame = QFrame()
-            status_frame.setStyleSheet("""
-                QFrame {
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    border-radius: 10px;
-                    padding: 15px;
-                    color: white;
-                    margin: 5px 0;
-                }
-                QLabel { color: white; }
-            """)
-            status_layout = QHBoxLayout(status_frame)
-            
-            # Icône et titre
-            simple_icon = QLabel("🎯")
-            simple_icon.setFont(QFont("Segoe UI", 32))
-            status_layout.addWidget(simple_icon)
-            
-            simple_title = QLabel("<b>Mode Simple activé</b><br>"
-                                   "Interface simplifiée avec actions essentielles. "
-                                   "Cliquez sur 'Mode Expert' pour plus d'options.")
-            simple_title.setStyleSheet("font-size: 13px; color: white;")
-            simple_title.setWordWrap(True)
-            status_layout.addWidget(simple_title)
-            status_layout.addStretch()
-            
-            # Badge vert
-            simple_badge = QLabel("✓ Actif")
-            simple_badge.setStyleSheet("""
-                background: #48bb78;
-                color: white;
-                padding: 5px 15px;
-                border-radius: 15px;
-                font-weight: bold;
-                font-size: 11px;
-            """)
-            status_layout.addWidget(simple_badge)
-            
-            main_layout.addWidget(status_frame)
-        
+
         # === BOUTONS D'ACTIONS (adaptatifs) ===
         btn_frame = QFrame()
-        btn_frame.setStyleSheet("background-color: #f7fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px;")
+        if self.interface_mode == "simple":
+            btn_frame.setStyleSheet("""
+                QFrame { background-color: #1a202c; border-top: 2px solid #2d3748;
+                         padding: 6px 10px; }
+                QPushButton {
+                    padding: 8px 18px; border-radius: 6px;
+                    font-size: 12px; font-weight: bold;
+                    border: none; color: white;
+                }
+                QPushButton:hover { opacity: 0.85; }
+            """)
+        else:
+            btn_frame.setStyleSheet("background-color: #f7fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px;")
+
         btn_grid = QGridLayout(btn_frame)
         btn_grid.setSpacing(6)
+        btn_grid.setContentsMargins(6, 4, 6, 4)
         
         visible_buttons = self.get_visible_buttons()
         
-        # Configuration des boutons disponibles
+        # Configuration des boutons disponibles avec des couleurs plus vives et modernes
         buttons_config = {
-            "refresh": ("🔄 Actualiser", "Met à jour la liste des machines", self.refresh_current_view, None),
-            "scan_full": ("🔍 Analyse Complète", "Analyse approfondie (~60-90s)", lambda: self.request_rescan(mode='full'), "background-color: #2c5282; color: white; font-weight: bold;"),
-            "scan_quick": ("⚡ Analyse Rapide", "Analyse rapide (~15-20s)", lambda: self.request_rescan(mode='quick'), "background-color: #38a169; color: white; font-weight: bold;"),
-            "details": ("📋 Voir le Rapport", "Affiche les détails de sécurité", self.show_details, None),
-            "pdf": ("📄 Exporter PDF", "Sauvegarde le rapport en PDF", self.export_pdf, None),
-            "hibp": ("📧 Emails Compromis", "Vérifie si des emails sont piratés", self.check_emails, "background-color: #744210; color: white;"),
-            "network": ("🔍 Explorer Réseau", "Découverte des appareils réseau", self.run_network_scan, None),
-            "scan_all_full": ("🔍 Tout Analyser (Complet)", "Analyse complète de toutes les machines", lambda: self.scan_all_machines(mode='full'), "background-color: #2d3748; color: white;"),
-            "scan_all_quick": ("⚡ Tout Analyser (Rapide)", "Analyse rapide de toutes les machines", lambda: self.scan_all_machines(mode='quick'), "background-color: #2f855a; color: white;"),
-            "api": ("⚙️ Paramètres", "Configuration et clés API", self.open_api_settings, None),
+            "refresh": ("\U0001f504 Actualiser", "Met à jour la liste des machines", self.refresh_current_view, "background-color: #0ea5e9;"),
+            "scan_full": ("\U0001f50d Analyse Complète", "Analyse approfondie (~60-90s)", lambda: self.request_rescan(mode='full'), "background-color: #3b82f6;"),
+            "scan_quick": ("\u26a1 Analyse Rapide", "Analyse rapide (~15-20s)", lambda: self.request_rescan(mode='quick'), "background-color: #22c55e;"),
+            "details": ("\U0001f4cb Voir le Rapport", "Affiche les détails de sécurité", self.show_details, "background-color: #f59e0b;"),
+            "pdf": ("\U0001f4c4 Exporter PDF", "Sauvegarde le rapport en PDF", self.export_pdf, "background-color: #ef4444;"),
+            "hibp": ("\U0001f4e7 Emails Compromis", "Vérifie si des emails sont piratés", self.check_emails, "background-color: #f97316;"),
+            "network": ("\U0001f50d Explorer Réseau", "Découverte des appareils réseau", self.run_network_scan, "background-color: #06b6d4;"),
+            "scan_all_full": ("\U0001f50d Tout Analyser (Complet)", "Analyse complète de toutes les machines", lambda: self.scan_all_machines(mode='full'), "background-color: #4f46e5;"),
+            "scan_all_quick": ("\u26a1 Tout Analyser (Rapide)", "Analyse rapide de toutes les machines", lambda: self.scan_all_machines(mode='quick'), "background-color: #10b981;"),
+            "api": ("\u2699\ufe0f Paramètres", "Configuration et clés API", self.open_api_settings, "background-color: #64748b;"),
             "toggle_mode": ("🔄 Mode Expert" if self.interface_mode == "simple" else "🔄 Mode Simple", 
                           "Bascule entre interface simplifiée et complète", 
                           self.toggle_interface_mode, 
-                          "background-color: #805ad5; color: white;"),
+                          "background-color: #8b5cf6;"),
         }
         
-        # Ajouter les boutons de la rangée 1
-        col = 0
-        for btn_key in visible_buttons["row1"]:
-            if btn_key in buttons_config:
-                text, tooltip, callback, style = buttons_config[btn_key]
-                btn = QPushButton(text)
-                btn.setToolTip(tooltip)
-                if style:
-                    btn.setStyleSheet(style)
-                btn.clicked.connect(callback)
-                btn_grid.addWidget(btn, 0, col)
-                col += 1
-        
-        # Ajouter les boutons de la rangée 2
-        col = 0
-        for btn_key in visible_buttons["row2"]:
-            if btn_key in buttons_config:
-                text, tooltip, callback, style = buttons_config[btn_key]
-                btn = QPushButton(text)
-                btn.setToolTip(tooltip)
-                if style:
-                    btn.setStyleSheet(style)
-                btn.clicked.connect(callback)
-                btn_grid.addWidget(btn, 1, col)
-                col += 1
+        # Mode simple : tout sur 1 seule ligne
+        if self.interface_mode == "simple":
+            simple_order = ["refresh", "scan_quick", "details", "pdf", "api", "toggle_mode"]
+            col = 0
+            for btn_key in simple_order:
+                if btn_key in buttons_config:
+                    text, tooltip, callback, style = buttons_config[btn_key]
+                    btn = QPushButton(text)
+                    btn.setToolTip(tooltip)
+                    if style:
+                        btn.setStyleSheet(style + " color: white; font-weight: bold; padding: 8px 14px;")
+                    btn.clicked.connect(callback)
+                    btn_grid.addWidget(btn, 0, col)
+                    col += 1
+        else:
+            # Ajouter les boutons de la rangée 1
+            col = 0
+            for btn_key in visible_buttons["row1"]:
+                if btn_key in buttons_config:
+                    text, tooltip, callback, style = buttons_config[btn_key]
+                    btn = QPushButton(text)
+                    btn.setToolTip(tooltip)
+                    if style:
+                        btn.setStyleSheet(style)
+                    btn.clicked.connect(callback)
+                    btn_grid.addWidget(btn, 0, col)
+                    col += 1
+            
+            # Ajouter les boutons de la rangée 2
+            col = 0
+            for btn_key in visible_buttons["row2"]:
+                if btn_key in buttons_config:
+                    text, tooltip, callback, style = buttons_config[btn_key]
+                    btn = QPushButton(text)
+                    btn.setToolTip(tooltip)
+                    if style:
+                        btn.setStyleSheet(style)
+                    btn.clicked.connect(callback)
+                    btn_grid.addWidget(btn, 1, col)
+                    col += 1
         
         main_layout.addWidget(btn_frame)
         
@@ -2082,6 +2118,8 @@ class CyberScanAdmin(QMainWindow):
                     scan_step_done = 0
                     scan_step_label = f"{info['hostname']}: {label_prefix}..."
                     last_ai_error = None
+                    self._scan_start_time = time.time()
+                    self._scan_mode = mode
                     self.activity_indicator.setValue(0)
                     self.activity_indicator.setVisible(True)
                     scanning_machines.add(machine_id)
@@ -2111,6 +2149,8 @@ class CyberScanAdmin(QMainWindow):
         scan_step_done = 0
         scan_step_label = "Scan rapide..." if mode == 'quick' else "Scan complet..."
         last_ai_error = None
+        self._scan_start_time = time.time()
+        self._scan_mode = mode
         self.activity_indicator.setValue(0)
         self.activity_indicator.setVisible(True)
         hostnames = []
@@ -2129,56 +2169,119 @@ class CyberScanAdmin(QMainWindow):
     def open_agent_scan_progress(self, hostnames):
         """Ouvre une fenêtre modale de progression pour les scans agents."""
         from PyQt6.QtWidgets import QProgressDialog
-        # Réinitialiser le flag de complétion
         self._scan_dialog_completed = False
-        total = max(scan_progress_total, 1)
         label = f"Scan en cours sur {', '.join(hostnames)}..." if hostnames else "Scan en cours..."
-        self.agent_progress_dialog = QProgressDialog(label, "Fermer", 0, total, self)
-        self.agent_progress_dialog.setWindowTitle("Scan des agents")
+        # Progression sur 100, bouton Annuler fonctionnel
+        self.agent_progress_dialog = QProgressDialog(label, "⏹ Annuler", 0, 100, self)
+        self.agent_progress_dialog.setWindowTitle("🔍 Scan des agents")
         self.agent_progress_dialog.setMinimumDuration(0)
-        self.agent_progress_dialog.setAutoClose(True)
+        self.agent_progress_dialog.setAutoClose(False)
         self.agent_progress_dialog.setAutoReset(False)
         self.agent_progress_dialog.setValue(0)
+        self.agent_progress_dialog.setMinimumWidth(440)
+        # Connecter le clic Annuler au nettoyage
+        self.agent_progress_dialog.canceled.connect(self._cancel_scan)
         self.agent_progress_dialog.show()
         self._agent_progress_timer = QTimer(self)
         self._agent_progress_timer.setInterval(400)
         self._agent_progress_timer.timeout.connect(self._update_agent_progress_dialog)
         self._agent_progress_timer.start()
 
+    def _cancel_scan(self):
+        """Annule le scan en cours proprement."""
+        global scanning_machines, scan_progress_total, scan_progress_done
+        global scan_step_total, scan_step_done, scan_step_label
+        # Arrêter le timer de mise à jour
+        if hasattr(self, '_agent_progress_timer') and self._agent_progress_timer:
+            self._agent_progress_timer.stop()
+        # Réinitialiser toutes les variables de scan
+        scanning_machines.clear()
+        scan_progress_total = 0
+        scan_progress_done  = 0
+        scan_step_total     = 0
+        scan_step_done      = 0
+        scan_step_label     = ""
+        self._scan_dialog_completed = True
+        # Fermer le dialog
+        if hasattr(self, 'agent_progress_dialog') and self.agent_progress_dialog:
+            self.agent_progress_dialog.close()
+        # Remettre la barre de statut en état normal
+        if hasattr(self, 'activity_indicator'):
+            self.activity_indicator.setValue(0)
+            self.activity_indicator.setVisible(False)
+        if hasattr(self, 'activity_label'):
+            self.activity_label.setText("Scan annulé")
+
+
     def _update_agent_progress_dialog(self):
         dlg = getattr(self, 'agent_progress_dialog', None)
         if dlg is None:
             return
-        # Vérifier si déjà complété pour éviter les répétitions
         if getattr(self, '_scan_dialog_completed', False):
             return
-        # Granularité fine: chaque machine = scan_step_total étapes IA
-        steps_per_machine = max(scan_step_total or 5, 1)
-        total_fine = max(scan_progress_total, 1) * steps_per_machine
-        done_fine = min(scan_progress_done, max(scan_progress_total, 1)) * steps_per_machine
-        # Ajouter la progression IA en cours pour la machine actuelle
-        if scan_progress_done < scan_progress_total:
-            done_fine += min(scan_step_done, steps_per_machine)
-        done_fine = min(done_fine, total_fine)
-        dlg.setMaximum(total_fine)
-        dlg.setValue(done_fine)
-        if scan_step_label:
-            dlg.setLabelText(f"{scan_step_label} ({done_fine}/{total_fine})")
-        elif scan_progress_done < scan_progress_total:
-            dlg.setLabelText(f"Collecte agent en cours... ({done_fine}/{total_fine})")
+
+        # ── Phase 1 : Attente résultat agent (simulation temporelle 0←40%) ──
+        # Durée estimée selon le mode
+        agent_phase_seconds = 25 if getattr(self, '_scan_mode', 'full') == 'quick' else 75
+        elapsed = time.time() - getattr(self, '_scan_start_time', time.time())
+
+        ai_phase_active = scan_step_done > 0 or scan_progress_done > 0
+
+        if not ai_phase_active:
+            # Progression simulée : 5% → 38% pendant la phase agent
+            ratio = min(elapsed / agent_phase_seconds, 1.0)
+            # Courbe progressive (lente au début, s'accélère)
+            pct = int(5 + 33 * (ratio ** 0.6))
+            phase_label = "Analyse de la machine en cours..."
         else:
-            dlg.setLabelText("✅ Scan et analyse terminés.")
+            # ── Phase 2 : Analyse IA (40←95%) ──
+            steps_per_machine = max(scan_step_total or 5, 1)
+            total_fine = max(scan_progress_total, 1) * steps_per_machine
+            done_fine  = min(scan_progress_done, max(scan_progress_total, 1)) * steps_per_machine
+            if scan_progress_done < scan_progress_total:
+                done_fine += min(scan_step_done, steps_per_machine)
+            done_fine = min(done_fine, total_fine)
+            ai_ratio = done_fine / total_fine if total_fine > 0 else 0
+            pct = int(40 + 55 * ai_ratio)
+            phase_label = scan_step_label if scan_step_label else "Analyse IA en cours..."
+
+        pct = max(5, min(pct, 99))
+        dlg.setMaximum(100)
+        dlg.setValue(pct)
+
+        # Label
+        machines_done  = scan_progress_done
+        machines_total = max(scan_progress_total, 1)
         if last_ai_error:
-            dlg.setLabelText(f"⚠ IA indisponible:\n{last_ai_error}")
-        # Scan terminé - fermer proprement
-        if not scanning_machines and scan_progress_total > 0 and scan_progress_done >= scan_progress_total:
+            dlg.setLabelText(f"⚠️ IA indisponible :\n{last_ai_error}")
+        elif scan_progress_done >= scan_progress_total and not scanning_machines and scan_progress_total > 0:
+            dlg.setLabelText(f"✅ Scan et analyse terminés.\n{machines_done}/{machines_total} machines analysées")
+        else:
+            dlg.setLabelText(f"{phase_label}\n{pct}% — machine {machines_done+1}/{machines_total}")
+
+        # ── Condition de fin normale ──
+        scan_done = (
+            not scanning_machines
+            and scan_progress_total > 0
+            and scan_progress_done >= scan_progress_total
+        )
+        # ── Timeout de sécurité : si l'agent ne répond plus après 3x le délai estimé ──
+        timeout_seconds = agent_phase_seconds * 3
+        timed_out = elapsed > timeout_seconds and not scanning_machines
+
+        if scan_done or timed_out:
+            if timed_out and not scan_done:
+                dlg.setLabelText("⚠️ Délai dépassé — scan terminé avec état inconnu.")
             self._scan_dialog_completed = True
             self._agent_progress_timer.stop()
-            dlg.setValue(total_fine)
-            # Fermer le dialog après un court délai
-            QTimer.singleShot(500, dlg.close)
+            dlg.setValue(100)
+            QTimer.singleShot(1200, dlg.close)
             if last_ai_error:
-                QMessageBox.critical(self, "Erreur IA", f"L'analyse IA a échoué.\n\n{last_ai_error}\n\nVérifiez vos clés API dans Paramètres.")
+                QMessageBox.critical(self, "Erreur IA",
+                    f"L'analyse IA a échoué.\n\n{last_ai_error}\n\nVérifiez vos clés API dans Paramètres.")
+
+
+
 
     def check_emails(self):
         """Vérifie des adresses email via HaveIBeenPwned sur la machine sélectionnée."""

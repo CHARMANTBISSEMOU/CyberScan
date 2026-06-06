@@ -25,6 +25,7 @@ def build_admin():
         '--onefile',
         '--windowed',
         '--clean',
+        f'--icon=C:\\Users\\EDITH-PARKERT\\Desktop\\COURS KEYCE\\Semestre II\\Projet tuteure4\\Medias\\logo.ico',
         f'--paths={current_dir}',
         f'--add-data={certs_dir};certs',
         '--hidden-import=ia_analyzer',

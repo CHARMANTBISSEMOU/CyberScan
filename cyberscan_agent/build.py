@@ -21,6 +21,7 @@ def build_agent():
         '--noconsole',     # Do not show a command prompt window (silent background execution)
         '--clean',         # Clean PyInstaller cache
         '--uac-admin',     # Request Administrator privileges when executed (required for Security Event Logs)
+        f'--icon=C:\\Users\\EDITH-PARKERT\\Desktop\\COURS KEYCE\\Semestre II\\Projet tuteure4\\Medias\\logo.ico',
         f'--paths={current_dir}',
         '--hidden-import=win_scanner',
         '--hidden-import=activity_logger',

